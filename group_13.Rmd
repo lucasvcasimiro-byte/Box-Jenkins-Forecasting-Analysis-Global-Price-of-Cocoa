@@ -1,73 +1,202 @@
 ---
 title: "Box-Jenkins Forecasting Analysis: Global Price of Cocoa"
-author: "Lucas Casimiro 20241796 / Lucas Christol 2024182 / Miguel Gomes 20241791 / Pedro Ferreira 20241735"
+author: "Lucas Casimiro 20241796 / Lucas Christol 20241827 / Miguel Gomes 20241791 / Pedro Ferreira 20241735"
 output: html_document
 date: "2026-05-29"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message= FALSE)
 ```
 
-# Loading necessary packages
+# 1. Imports and data preparation
 
-```{r}
+```{r packages}
 library(fredr) 
 library(tsibble) 
 library(fable) 
 library(feasts) 
 library(dplyr) 
 library(ggplot2)
-
-
-fredr_set_key("PCOCOUSDM")
+library(lubridate)
 ```
 
-# Set your API Key programmatically
-
+```{r set-api-key}
+fredr_set_key("14da34f1201fa46c838595fe42148d06")
+```
 
 ```{r fetch-cocoa-data}
-# Fetching Global Price of Cocoa (US$ per Metric Ton)
+# Download dataset from FRED since 2000-01
 raw_cocoa <- fredr(
   series_id = "PCOCOUSDM",
   observation_start = as.Date("2000-01-01"), 
-  observation_end = as.Date("2026-03-01")
+  observation_end = Sys.Date(),
+  frequency = "m"
 )
 
-# Convert to a seasonal tsibble object for the fable framework
+# Convert to clean monthly tsibble
 cocoa_ts <- raw_cocoa %>%
   mutate(Month = yearmonth(date)) %>%
-  as_tsibble(index = Month) %>%
   select(Month, value) %>%
-  rename(Price = value)
+  rename(Price = value) %>%
+  as_tsibble(index = Month)
+```
 
-### Initial Visualization Chunk
+```{r split-data}
+# Splitting train and test data, using last 2 years for testing
+cocoa_train <- cocoa_ts %>% filter(Month <= max(Month) - 24)
+cocoa_test <- cocoa_ts %>% filter(Month > max(Month) - 24)
+```
+
+*Write your introduction and context on cocoa price dynamics and dataset relevance here.*
+
+# 2. TENTATIVE IDENTIFICATION PHASE
+
+## 2.1 Visualize the Raw Time Series
+
+```{r plot-raw}
 cocoa_ts %>%
   autoplot(Price) +
   labs(
-    title = "Global Price of Cocoa (2000 - 2026)",
+    title = "Global Price of Cocoa (PCOCOUSDM): 2000–2026",
     y = "USD per Metric Ton",
     x = "Year"
   ) +
   theme_minimal()
-
 ```
 
+*Discuss major trends, price shocks, and any visible seasonality.*
 
-## R Markdown
+## 2.2 Log Transformation for Variance Stabilization
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-summary(cars)
-
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r log-transform}
+# Adding log-price column for later modeling
+cocoa_ts <- cocoa_ts %>%
+  mutate(log_price = log(Price))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+*Briefly justify why log transformation is suitable given volatility and shocks.*
+
+## 2.3 Differencing and ACF/PACF Analysis
+
+```{r acf-pacf}
+# Visualizing log-price, seasonal, and non-seasonal lags
+cocoa_ts %>%
+  gg_tsdisplay(log_price, plot_type = "partial")
+```
+
+```{r acf-pacf}
+# Visualizing log-price, seasonal, and non-seasonal lags
+cocoa_ts %>%
+  gg_tsdisplay(difference(log_price), plot_type = "partial")
+```
+
+*Interpret the ACF and PACF patterns you see here (indicate likely values for d and D).*
+
+## 2.4 Unit Root Tests (Mathematical Differencing Justification)
+
+```{r unit-root}
+# Computing required differencing orders
+ndiffs <- cocoa_ts %>%
+  features(log_price, features = unitroot_ndiffs)
+
+nsdiffs <- cocoa_ts %>%
+  features(log_price, features = unitroot_nsdiffs)
+
+ndiffs
+nsdiffs
+```
+
+*State which differences you will use and why, based on the outputs above.*
+
+# 3. MODEL ESTIMATION PHASE
+
+## 3.1 Fit Candidate SARIMA Models
+
+```{r fit-models}
+# Manual SARIMA: adjust pdq/PDQ per identification above
+fit_manual <- cocoa_ts %>%
+  model(SARIMA_manual = ARIMA(log_price ~ pdq(1,1,1) + PDQ(1,1,1)[12]))
+
+# Automatic SARIMA search as a benchmark
+fit_auto <- cocoa_ts %>%
+  model(SARIMA_auto = ARIMA(log_price))
+```
+
+*Justify your manual candidate orders using previous diagnostics. Note what the auto model selects.*
+
+## 3.2 Compare Model Fit (AICc Table)
+
+```{r compare-models}
+library(broom)
+model_stats <- bind_rows(
+  glance(fit_manual) %>% mutate(model = "Manual SARIMA"),
+  glance(fit_auto) %>% mutate(model = "Auto SARIMA")
+)
+
+knitr::kable(
+  model_stats %>% select(model, aic, aicc, bic, log_lik),
+  digits = 2, caption = "SARIMA Model Comparison"
+)
+```
+
+*Interpret fit criteria and state which model is preferred.*
+
+# 4. DIAGNOSTIC CHECKING PHASE
+
+## 4.1 Residual Plots (White Noise Assessment)
+
+```{r residual-plots}
+# Use best model from above (replace SARIMA_auto if manual is better)
+best_fit <- fit_auto
+
+best_fit %>% gg_tsresiduals()
+```
+
+*Examine and comment on white noise, autocorrelation, and outliers in residuals.*
+
+## 4.2 Ljung-Box Test for Residual Independence
+
+```{r ljung-box}
+# Ljung-Box test
+# Adjust dof to match number of estimated parameters in your selected model
+best_fit %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 24, dof = 6)
+```
+
+*Interpret whether autocorrelation appears in the residuals (p-values).*
+
+# 5. FORECASTING PHASE
+
+## 5.1 24-Month (2-Year) Ahead Ex-ante Forecast
+
+```{r forecast-24mo}
+# Forecast next 2 years (24 months)
+forecast_24mo <- best_fit %>%
+  forecast(h = "2 years")
+
+forecast_24mo %>%
+  autoplot(cocoa_ts, level = c(80, 95)) +
+  labs(
+    title = "24-Month Forecast: Global Price of Cocoa (log-scale)",
+    y = "Log(USD per Metric Ton)",
+    x = "Year"
+  ) +
+  theme_minimal()
+```
+
+*Interpret the forecast levels, trend, and confidence intervals for stakeholders.*
+
+# 6. FINAL SUBMISSION: DATA EXPORT
+
+```{r save-tsibble}
+# Saving the cleaned cocoa tsibble for reproducibility
+save(cocoa_ts, file = "data_group_10.RData")
+```
+
+## SESSION INFO
+
+```{r session-info, echo=FALSE}
+sessionInfo()
+```
