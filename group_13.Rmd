@@ -1,0 +1,73 @@
+---
+title: "Box-Jenkins Forecasting Analysis: Global Price of Cocoa"
+author: "Lucas Casimiro 20241796 / Lucas Christol 2024182 / Miguel Gomes 20241791 / Pedro Ferreira 20241735"
+output: html_document
+date: "2026-05-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading necessary packages
+
+```{r}
+library(fredr) 
+library(tsibble) 
+library(fable) 
+library(feasts) 
+library(dplyr) 
+library(ggplot2)
+
+
+fredr_set_key("PCOCOUSDM")
+```
+
+# Set your API Key programmatically
+
+
+```{r fetch-cocoa-data}
+# Fetching Global Price of Cocoa (US$ per Metric Ton)
+raw_cocoa <- fredr(
+  series_id = "PCOCOUSDM",
+  observation_start = as.Date("2000-01-01"), 
+  observation_end = as.Date("2026-03-01")
+)
+
+# Convert to a seasonal tsibble object for the fable framework
+cocoa_ts <- raw_cocoa %>%
+  mutate(Month = yearmonth(date)) %>%
+  as_tsibble(index = Month) %>%
+  select(Month, value) %>%
+  rename(Price = value)
+
+### Initial Visualization Chunk
+cocoa_ts %>%
+  autoplot(Price) +
+  labs(
+    title = "Global Price of Cocoa (2000 - 2026)",
+    y = "USD per Metric Ton",
+    x = "Year"
+  ) +
+  theme_minimal()
+
+```
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+summary(cars)
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
