@@ -43,9 +43,29 @@ cocoa_ts <- raw_cocoa %>%
 ```
 
 ```{r split-data}
-# Splitting train and test data, using last 2 years for testing
-cocoa_train <- cocoa_ts %>% filter(Month <= max(Month) - 24)
-cocoa_test <- cocoa_ts %>% filter(Month > max(Month) - 24)
+# Splitting train and test data, using last 2 years (24 months) for testing
+# Use row-based slicing to avoid ambiguity with yearmonth arithmetic
+train_n <- nrow(cocoa_ts) - 24
+cocoa_train <- cocoa_ts %>% slice_head(n = train_n)
+cocoa_test <- cocoa_ts %>% slice_tail(n = 24)
+
+# compute the start of the test period as a Date for plotting/annotation
+split_start <- as.Date(min(cocoa_test$Month))
+
+```
+
+```{r show-split}
+# Print sizes and show a plot marking the train/test split
+cat("Training observations:", nrow(cocoa_train), "\n")
+cat("Testing observations:", nrow(cocoa_test), "\n")
+
+ggplot(cocoa_ts, aes(x = as.Date(Month), y = Price)) +
+  geom_line() +
+  geom_rect(aes(xmin = split_start, xmax = as.Date(max(Month)), ymin = -Inf, ymax = Inf),
+            fill = "grey80", alpha = 0.35, inherit.aes = FALSE) +
+  geom_vline(xintercept = split_start, linetype = "dashed") +
+  labs(title = "Training/Test Split (shaded = test)", x = "Month", y = "USD per Metric Ton") +
+  theme_minimal()
 ```
 
 *Write your introduction and context on cocoa price dynamics and dataset relevance here.*
