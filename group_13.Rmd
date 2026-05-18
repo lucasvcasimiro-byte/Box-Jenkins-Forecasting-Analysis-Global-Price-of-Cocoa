@@ -9,7 +9,9 @@ date: "2026-05-29"
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message= FALSE)
 ```
 
-# 1. Imports and data preparation
+# 1. Introduction
+
+Global cocoa prices have been an interesting topic as of late, due to severe weather conditions and diseases affecting crops in West Africa, one of the main supply areas. We utilize the Global Price of Cocoa (PCOCOUSDM) monthly dataset from FRED to analyze the dynamics involved, while employing the Box-Jenkins methodology, a robust approach for time series analysis and forecasting.
 
 ```{r packages}
 library(fredr) 
@@ -19,14 +21,11 @@ library(feasts)
 library(dplyr) 
 library(ggplot2)
 library(lubridate)
-```
 
-```{r set-api-key}
+# Using API key for access to dataset, from library fredr
 fredr_set_key("14da34f1201fa46c838595fe42148d06")
-```
 
-```{r fetch-cocoa-data}
-# Download dataset from FRED since 2000-01
+# Filter dataset from FRED since 2000
 raw_cocoa <- fredr(
   series_id = "PCOCOUSDM",
   observation_start = as.Date("2000-01-01"), 
@@ -34,58 +33,34 @@ raw_cocoa <- fredr(
   frequency = "m"
 )
 
-# Convert to clean monthly tsibble
+# Convert to tsibble
 cocoa_ts <- raw_cocoa %>%
   mutate(Month = yearmonth(date)) %>%
   select(Month, value) %>%
   rename(Price = value) %>%
   as_tsibble(index = Month)
-```
-
-```{r split-data}
-# Splitting train and test data, using last 2 years (24 months) for testing
-# Use row-based slicing to avoid ambiguity with yearmonth arithmetic
-train_n <- nrow(cocoa_ts) - 24
-cocoa_train <- cocoa_ts %>% slice_head(n = train_n)
-cocoa_test <- cocoa_ts %>% slice_tail(n = 24)
-
-# compute the start of the test period as a Date for plotting/annotation
-split_start <- as.Date(min(cocoa_test$Month))
 
 ```
-
-```{r show-split}
-# Print sizes and show a plot marking the train/test split
-cat("Training observations:", nrow(cocoa_train), "\n")
-cat("Testing observations:", nrow(cocoa_test), "\n")
-
-ggplot(cocoa_ts, aes(x = as.Date(Month), y = Price)) +
-  geom_line() +
-  geom_rect(aes(xmin = split_start, xmax = as.Date(max(Month)), ymin = -Inf, ymax = Inf),
-            fill = "grey80", alpha = 0.35, inherit.aes = FALSE) +
-  geom_vline(xintercept = split_start, linetype = "dashed") +
-  labs(title = "Training/Test Split (shaded = test)", x = "Month", y = "USD per Metric Ton") +
-  theme_minimal()
-```
-
-*Write your introduction and context on cocoa price dynamics and dataset relevance here.*
-
-# 2. TENTATIVE IDENTIFICATION PHASE
-
-## 2.1 Visualize the Raw Time Series
 
 ```{r plot-raw}
 cocoa_ts %>%
   autoplot(Price) +
-  labs(
-    title = "Global Price of Cocoa (PCOCOUSDM): 2000–2026",
+  labs(title = "Global Price of Cocoa: 2000–2026",
     y = "USD per Metric Ton",
-    x = "Year"
-  ) +
-  theme_minimal()
+    x = "Year") + theme_minimal()
 ```
 
-*Discuss major trends, price shocks, and any visible seasonality.*
+Historically, global cocoa prices fluctuated around 2000\$ and 3000\$, exhibiting long-term stability. However, we can clearly see from the raw data when the complications mentioned started (late 2023), and the price skyrockets to values over 8000\$, even reaching 10000\$. A slight correction is noticed beginning last year, with closer to normal values recently.
+
+```{r split-data}
+# Splitting train and test data, using last 2 years (24 months) for testing
+cocoa_train <- cocoa_ts %>% 
+  filter(Month <= max(Month) - 24)
+cocoa_test <- cocoa_ts %>% 
+  filter(Month > max(Month) - 24)
+```
+
+# 2. TENTATIVE IDENTIFICATION PHASE
 
 ## 2.2 Log Transformation for Variance Stabilization
 
@@ -212,7 +187,7 @@ forecast_24mo %>%
 
 ```{r save-tsibble}
 # Saving the cleaned cocoa tsibble for reproducibility
-save(cocoa_ts, file = "data_group_10.RData")
+save(cocoa_ts, file = "data_group_13.RData")
 ```
 
 ## SESSION INFO
