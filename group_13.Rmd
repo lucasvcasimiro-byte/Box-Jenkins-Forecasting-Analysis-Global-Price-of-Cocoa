@@ -60,92 +60,129 @@ cocoa_test <- cocoa_ts %>%
   filter(Month > max(Month) - 24)
 ```
 
+The dataset is partitioned into a training set (from 2000 through mid-2024) and a testing set including the last 2 years. This testing window is strategic given the unusual spike as of recent years, as it allows our model to be stress-tested in extreme market conditions.
+
+While keeping a massive training dataset with the long-term stability and the beginning of the cocoa price crisis, the testing window forces us to evaluate whether a traditional SARIMA structure can adapt to these conditions.
+
 # 2. TENTATIVE IDENTIFICATION PHASE
 
-## 2.2 Log Transformation for Variance Stabilization
+## Log Transformation
 
 ```{r log-transform}
 # Adding log-price column for later modeling
-cocoa_ts <- cocoa_ts %>%
+cocoa_train <- cocoa_train %>%
   mutate(log_price = log(Price))
 ```
 
-*Briefly justify why log transformation is suitable given volatility and shocks.*
+Visual inspection of the raw time series reveals heteroscedacity. When the price of cocoa increases, the variance increases. To stabilize these changes, we apply a log transformation before conducting stationary tests or differencing.
 
-## 2.3 Differencing and ACF/PACF Analysis
+## Differencing and ACF/PACF Analysis
 
 ```{r acf-pacf}
 # Visualizing log-price, seasonal, and non-seasonal lags
-cocoa_ts %>%
+cocoa_train %>%
   gg_tsdisplay(log_price, plot_type = "partial")
 ```
 
-```{r acf-pacf}
-# Visualizing log-price, seasonal, and non-seasonal lags
-cocoa_ts %>%
+Before differencing, we can see the ACF shows a very slow, linear decay across all lags, and the PACF has a massive spike at lag 1 and white noise after. These plots are characteristic of a non-stationary random walk, which confirms the presence of a unit root, and the need for differencing.
+
+```{r acf-pacf-stationary}
+# Same visualization after differencing
+cocoa_train %>%
   gg_tsdisplay(difference(log_price), plot_type = "partial")
 ```
 
-*Interpret the ACF and PACF patterns you see here (indicate likely values for d and D).*
+After taking the first difference (d=1), the series now looks stationary. The ACF plot shows a significant spike at lag 1 followed by a cut-off, same as the PACF. Because both function exhibit the same behavior, visually distinguishing between a pure AR or a pure MA model is ambiguous. Therefore, we identify ARIMA(1,1,0) and ARIMA(0,1,1) as strong baseline models, while also including a ARIMA(1,1,1) candidate to capture potential overlapping.
 
-## 2.4 Unit Root Tests (Mathematical Differencing Justification)
+## Unit Root Testing
 
 ```{r unit-root}
 # Computing required differencing orders
-ndiffs <- cocoa_ts %>%
+ndiffs <- cocoa_train %>%
   features(log_price, features = unitroot_ndiffs)
 
-nsdiffs <- cocoa_ts %>%
+nsdiffs <- cocoa_train %>%
   features(log_price, features = unitroot_nsdiffs)
 
 ndiffs
 nsdiffs
 ```
 
-*State which differences you will use and why, based on the outputs above.*
+To mathematically confirm our visual analysis regarding stationarity above, unit root testing was used (testing for both seasonal and non-seasonal differences). The ndiffs test indicated that one non-seasonal difference is necessary (confirming previous observation). The nsdiffs test indicated that no seasonal differencing is needed. This means our candidate models will proceed with d=1 and D=0.
 
-# 3. MODEL ESTIMATION PHASE
+## Information Criteria for Model Identification
 
-## 3.1 Fit Candidate SARIMA Models
+Information Criteria is used as a supplementary guide to our ACF/PACF analysis, with the intention of helping in the decision between the candidate models. The candidate models are fitted and their information criteria is showed in a table.
+
+Given our moderate sample size, we prioritize AICc (and AIC) over BIC, as AIC-based criteria perform better in smaller samples, while BIC can become unreliable and select overparameterized models in this case.
 
 ```{r fit-models}
-# Manual SARIMA: adjust pdq/PDQ per identification above
-fit_manual <- cocoa_ts %>%
-  model(SARIMA_manual = ARIMA(log_price ~ pdq(1,1,1) + PDQ(1,1,1)[12]))
+# Fitting candidate SARIMA models from previous analysis
+fit_models <- cocoa_train %>%
+  model(
+    # MA(1) non-seasonal
+    SARIMA_011_001 = ARIMA(log_price ~ pdq(0,1,1) + PDQ(0,0,1, period=12)),
+    
+    # AR(1) non-seasonal
+    SARIMA_110_100 = ARIMA(log_price ~ pdq(1,1,0) + PDQ(1,0,0, period=12)),
+    
+    # ARMA(1,1) + seasonal MA term
+    SARIMA_111_001 = ARIMA(log_price ~ pdq(1,1,1) + PDQ(0,0,1, period=12)),
+        
+    # ARMA(1,1) + seasonal AR term
+    SARIMA_111_100 = ARIMA(log_price ~ pdq(1,1,1) + PDQ(1,0,0, period=12)),
+    
+    # Automatic search to serve as a benchmark   
+    SARIMA_auto = ARIMA(log_price))
 
-# Automatic SARIMA search as a benchmark
-fit_auto <- cocoa_ts %>%
-  model(SARIMA_auto = ARIMA(log_price))
-```
-
-*Justify your manual candidate orders using previous diagnostics. Note what the auto model selects.*
-
-## 3.2 Compare Model Fit (AICc Table)
-
-```{r compare-models}
-library(broom)
-model_stats <- bind_rows(
-  glance(fit_manual) %>% mutate(model = "Manual SARIMA"),
-  glance(fit_auto) %>% mutate(model = "Auto SARIMA")
-)
-
+# Displaying the information criteria table for identification selection 
 knitr::kable(
-  model_stats %>% select(model, aic, aicc, bic, log_lik),
+  glance(fit_models) %>% 
+    select(.model, AIC, AICc, BIC) %>%
+    arrange(AICc),
   digits = 2, caption = "SARIMA Model Comparison"
 )
 ```
 
-*Interpret fit criteria and state which model is preferred.*
+Interestingly, our results don't reach a perfect consensus. SARIMA_auto minimizes both AICc and AIC. However, the BIC defends the simpler manual configurations SARIMA_011_001 and SARIMA_110_100.
+
+Following the principle defined, we proceed with SARIMA_auto into the estimation and diagnostic phases, checking if its additional parameter complexity is truly justified.
+
+# 3. MODEL ESTIMATION PHASE
+
+With our tentatively identified model, we move to the formal estimation phase using Maximum-Likelihood Estimation. Also, we create a table to compare the log-likelihood for every model.
+
+```{r estimate-chosen}
+best_model <- fit_models %>% select(SARIMA_auto)
+
+# Table for log-likelihood comparison
+knitr::kable(
+  glance(fit_models) %>% 
+    select(.model, log_lik) %>%
+    arrange(log_lik),
+  digits = 2, caption = "Log-Likelihood Comparison"
+)
+
+best_model %>%
+  report()
+  
+```
+
+We can see that the highest raw log-likelihood value belongs to the SARIMA_auto model, the one we chose, which indicates a better mathematical fit.
+
+The report output shows that SARIMA_auto achieved this superior fit by estimating a ARIMA(2,1,2)(1,0,0)[12] w/ drift structure. This validates our unit roots testing results, with d=1 and D=0, while uncovering higher terms and an upward trend that were omitted during visual inspection of the plots.
+
+The estimated parameters for this model are $\phi_1 = -0.8521$, $\phi_2 = -0.5445$, $\theta_1 = 1.1223$, $\theta_2 = 0.6808$, and a seasonal autoregressive term $\Phi_1 = 0.0065$. While the non-seasonal parameters are significant given their standard error, the seasonal parameter has a standard error that vastly exceeds its own estimate, indicating that said component is statistically insignificant.
+
+However, the estimation values are completely invalid if the candidate model has structural flaws or over-parametrization. This means we can only reach a conclusion after verifying if this model is valid in our diagnostic checking phase.
 
 # 4. DIAGNOSTIC CHECKING PHASE
 
-## 4.1 Residual Plots (White Noise Assessment)
+## Residual Plots (White Noise Assessment)
 
 ```{r residual-plots}
-# Use best model from above (replace SARIMA_auto if manual is better)
-best_fit <- fit_auto
-
-best_fit %>% gg_tsresiduals()
+# Plotting the residuals from the model chosen
+best_model %>% gg_tsresiduals()
 ```
 
 *Examine and comment on white noise, autocorrelation, and outliers in residuals.*
@@ -153,22 +190,21 @@ best_fit %>% gg_tsresiduals()
 ## 4.2 Ljung-Box Test for Residual Independence
 
 ```{r ljung-box}
-# Ljung-Box test
-# Adjust dof to match number of estimated parameters in your selected model
-best_fit %>%
+# lag = 24 for monthly data, dof = 5 (ARIMA(2,1,2)(1,0,0)[12], 2+1+2=5)
+best_model %>%
   augment() %>%
-  features(.innov, ljung_box, lag = 24, dof = 6)
+  features(.innov, ljung_box, lag = 24, dof = 5)
 ```
 
 *Interpret whether autocorrelation appears in the residuals (p-values).*
 
 # 5. FORECASTING PHASE
 
-## 5.1 24-Month (2-Year) Ahead Ex-ante Forecast
+## 24-Month (2-Year) Forecast
 
 ```{r forecast-24mo}
-# Forecast next 2 years (24 months)
-forecast_24mo <- best_fit %>%
+# Forecast next 2 years 
+forecast_24mo <- best_model %>%
   forecast(h = "2 years")
 
 forecast_24mo %>%
