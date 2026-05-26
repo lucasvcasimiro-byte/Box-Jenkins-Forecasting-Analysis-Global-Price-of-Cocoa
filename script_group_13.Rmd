@@ -1,0 +1,290 @@
+---
+title: "Box-Jenkins Forecasting Analysis: Global Price of Cocoa"
+author: "Lucas Casimiro 20241796 / Lucas Christol 20241827 / Miguel Gomes 20241791 / Pedro Ferreira 20241735"
+output: html_document
+date: "2026-05-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message= FALSE)
+```
+
+# Introduction
+
+Global cocoa prices have been an interesting topic as of late, due to severe weather conditions and diseases affecting crops in West Africa, one of the main supply areas. We utilize the Global Price of Cocoa (PCOCOUSDM) monthly dataset from FRED to analyze the dynamics involved, while employing the Box-Jenkins methodology, a robust approach for time series analysis and forecasting.
+
+```{r packages}
+library(fredr) 
+library(tsibble) 
+library(fable) 
+library(feasts) 
+library(dplyr) 
+library(ggplot2)
+library(lubridate)
+
+# Using API key for access to dataset, from library fredr
+fredr_set_key("14da34f1201fa46c838595fe42148d06")
+
+# Filter dataset from FRED since 2000
+raw_cocoa <- fredr(
+  series_id = "PCOCOUSDM",
+  observation_start = as.Date("2000-01-01"), 
+  observation_end = Sys.Date(),
+  frequency = "m"
+)
+
+# Convert to tsibble
+cocoa <- raw_cocoa %>%
+  mutate(Month = yearmonth(date)) %>%
+  select(Month, value) %>%
+  rename(Price = value) %>%
+  as_tsibble(index = Month)
+
+```
+
+```{r plot-raw}
+cocoa %>%
+  autoplot(Price) +
+  labs(title = "Global Price of Cocoa: 2000–2026",
+    y = "USD per Metric Ton",
+    x = "Year") + theme_minimal()
+```
+
+Historically, global cocoa prices fluctuated around 2000\$ and 3000\$, exhibiting long-term stability. However, we can see from the raw data when the complications mentioned started (late 2023), and the price skyrockets to values over 8000\$, even reaching 10000\$. A slight correction is noticed beginning last year, with closer to normal values recently.
+
+## Log Transformation
+
+```{r log-transform}
+# Adding log-price column for later modeling
+cocoa <- cocoa %>%
+  mutate(log_price = log(Price))
+```
+
+Visual inspection of the raw time series reveals heteroscedacity. When the price of cocoa increases, the variance increases. To stabilize these changes, we apply a log transformation before conducting stationary tests or differencing.
+
+## Data Partitioning
+
+```{r split-data}
+# Splitting train and test data, using last 2 years (24 months) for testing
+cocoa_train <- cocoa %>% 
+  filter(Month <= max(Month) - 24)
+cocoa_test <- cocoa %>% 
+  filter(Month > max(Month) - 24)
+```
+
+The dataset is partitioned into a training set (from 2000 through mid-2024) and a testing set including the last 2 years. This testing window is strategic given the unusual spike as of recent years, as it allows our model to be stress-tested in extreme market conditions.
+
+# TENTATIVE IDENTIFICATION PHASE
+
+## Unit Root Testing
+
+```{r unit-root}
+# Computing required differencing orders
+ndiffs <- cocoa_train %>%
+  features(log_price, features = unitroot_ndiffs)
+
+nsdiffs <- cocoa_train %>%
+  features(log_price, features = unitroot_nsdiffs)
+
+ndiffs
+nsdiffs
+```
+
+Unit root tests confirm that one non-seasonal difference is necessary (d=1), and no seasonal difference is required (D=0) to achieve stationarity.
+
+## Differencing and ACF/PACF Analysis
+
+```{r acf-pacf}
+# Visualizing log-price, seasonal, and non-seasonal lags
+cocoa_train %>%
+  gg_tsdisplay(log_price, plot_type = "partial")
+```
+
+Before differencing, we can see the ACF shows a very slow, linear decay across all lags, and the PACF has a massive spike at lag 1 and white noise after. These plots are characteristic of a non-stationary random walk, which confirms the presence of a unit root, and the need for differencing.
+
+```{r acf-pacf-stationary}
+# Same visualization after differencing
+cocoa_train %>%
+  gg_tsdisplay(difference(log_price), plot_type = "partial")
+```
+
+After taking the first difference (d=1), the series now looks stationary. The ACF plot shows a significant spike at lag 1, same as the PACF. Because both functions exhibit the same behavior, visually distinguishing between a pure AR or a pure MA model is ambiguous. Therefore, we identify ARIMA(1,1,0) and ARIMA(0,1,1) as strong baseline models, while also including a ARIMA(1,1,1) candidate to capture potential overlapping.
+
+## Information Criteria for Model Identification
+
+We use Information Criteria as a supplementary guide to evaluate our candidate models.
+
+Given our moderate sample size, we prioritize AICc (and AIC) over BIC, as AIC-based criteria perform better in smaller samples, while BIC can become unreliable and select overparameterized models in this case.
+
+```{r fit-models}
+# Fitting candidate SARIMA models from previous analysis
+fit_models <- cocoa_train %>%
+  model(
+    # MA(1) non-seasonal
+    SARIMA_011_001 = ARIMA(log(Price) ~ pdq(0,1,1) + PDQ(0,0,1, period=12)),
+    
+    # AR(1) non-seasonal
+    SARIMA_110_100 = ARIMA(log(Price) ~ pdq(1,1,0) + PDQ(1,0,0, period=12)),
+    
+    # ARMA(1,1) + seasonal MA term
+    SARIMA_111_001 = ARIMA(log(Price) ~ pdq(1,1,1) + PDQ(0,0,1, period=12)),
+        
+    # ARMA(1,1) + seasonal AR term
+    SARIMA_111_100 = ARIMA(log(Price) ~ pdq(1,1,1) + PDQ(1,0,0, period=12)),
+    
+    # Automatic search    
+    SARIMA_auto = ARIMA(log(Price)))
+
+# Displaying the information criteria table for identification selection 
+knitr::kable(
+  glance(fit_models) %>% 
+    select(.model, AIC, AICc, BIC) %>%
+    arrange(AICc),
+  digits = 2, caption = "SARIMA Model Comparison"
+)
+```
+
+Interestingly, our results don't reach a perfect consensus. SARIMA_auto minimizes both AICc and AIC. However, the BIC defends the simpler manual configurations SARIMA_011_001 and SARIMA_110_100.
+
+Following the principle defined, we proceed with SARIMA_auto into the estimation and diagnostic phases, checking if its additional parameter complexity is truly justified.
+
+# MODEL ESTIMATION PHASE
+
+```{r estimate-chosen}
+chosen_model <- fit_models %>% select(SARIMA_auto)
+
+# Log-likelihood comparison table
+knitr::kable(
+  glance(fit_models) %>% 
+    select(.model, log_lik) %>%
+    arrange(log_lik),
+  digits = 2, caption = "Log-Likelihood Comparison"
+)
+
+chosen_model %>%
+  report()
+  
+```
+
+Using Maximum-Likelihood Estimation, SARIMA_auto achieves the best log-likelihood value (visualized in comparison table).
+
+The report output shows that SARIMA_auto achieved this superior fit by estimating a ARIMA(2,1,2)(1,0,0)[12] w/ drift structure. This validates our unit roots testing results, with d=1 and D=0, while uncovering higher terms and an upward trend that were omitted during visual inspection of the plots.
+
+The estimated parameters for this model are $\phi_1 = -0.8521$, $\phi_2 = -0.5445$, $\theta_1 = 1.1223$, $\theta_2 = 0.6808$, and a seasonal autoregressive term $\Phi_1 = 0.0065$. The seasonal parameter has a standard error that vastly exceeds its own estimate, indicating that said component is statistically insignificant. So, we will refit without this component.
+
+```{r refit-no-seasonal}
+# Refitting without seasonal component
+best_model <- cocoa_train %>%
+  model(ARIMA_212_000 = ARIMA(log(Price) ~ pdq(2,1,2) + PDQ(0,0,0, period=12)))
+
+best_model %>% 
+  report()
+
+```
+
+By removing the redundant seasonal term, we address the threat of over-parametrization. However, these new parameter estimates are only relevant if the model is deemed valid in the diagnostic checking phase.
+
+# DIAGNOSTIC CHECKING PHASE
+
+## Residual Plots (White Noise Assessment)
+
+```{r residual-plots}
+# Plotting the residuals from the model chosen
+best_model %>% gg_tsresiduals()
+```
+
+The diagnostic plots confirm that the model's residuals can be considered white noise.
+
+The innovation residuals bounce randomly around 0, even with a non-constant variance, showing how volatile the cocoa market is.
+
+The ACF plot demonstrates a clear lack of correlation, with all the lags inside the threshold lines, proving the model captures all the available patterns in the data.
+
+Finally, the residual errors are normally distributed, with higher density around the 0 with few values forming small tails, ensuring the that the calculated confidence intervals are reliable.
+
+## Ljung-Box Test for Residual Independence
+
+To mathematically support our visual inspection, we conduct a Ljung-Box Test ($\alpha = 0.05$) to verify residual independence.
+
+```{r ljung-box}
+# lag = 24 for monthly data, dof = 5 (ARIMA(2,1,2)(1,0,0)[12], 2+1+2=5)
+best_model %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 24, dof = 5)
+```
+
+The test gives a Ljung-box test statistic of 13.70356 and a p-value of 0.801. Since the p-value is substantially higher than the significance level, we fail to reject the null hypothesis. We can conclude that the model's residuals are independent and behave as a white noise process.
+
+# FORECASTING PHASE
+
+## Forecast Accuracy on the Test Set
+
+To evaluate our model, we run an out-of-sample backtest using our test set (last 2 years).
+
+```{r forecast-accuracy}
+# Evaluating the selected model against the 2 years test set
+test_forecast <- best_model %>%
+  forecast(h = nrow(cocoa_test))
+
+accuracy_table <- accuracy(test_forecast, cocoa_test) %>%
+  select(.model, RMSE, MAE, MAPE)
+
+knitr::kable(
+  accuracy_table,
+  digits = 3,
+  caption = "Forecast Accuracy on the Test Set"
+)
+```
+
+The results show how our model performs when forced to predict under an unprecedented market shock. We have a RMSE = 2446.6\$ and a MAE = 1835.6\$, meaning that on average, the point forecast was off almost 2000\$ per metric ton. Although this is high, it accurately shows the difficulty faced by a linear model when working with such unpredictable data.
+
+The MAPE is 33.8%, which confirms the model struggled. Because the model's point forecast aims for a conservative stabilization line after a major trend shift, it significantly underpredicted the peak crisis values.
+
+## 2 Year Forecast
+
+```{r forecast-2y}
+final_model <- cocoa %>%
+  model(SARIMA_auto = ARIMA(log(Price)))
+
+final_model %>%
+  report()
+
+# Forecast next 2 years
+future_forecast_2y <- final_model %>%
+  forecast(h = "2 years")
+
+future_forecast_2y %>%
+  autoplot(cocoa, level = c(80, 95)) +
+  labs(
+    title = "Future 2 Year Forecast: Global Price of Cocoa",
+    y = "USD per Metric Ton",
+    x = "Year"
+  ) + theme_minimal()
+```
+
+The 2-year ahead point forecast projects that following the market correction in 2025, global cocoa prices will enter a period of gradual stabilization with a slight upward drift, starting at roughly 3300\$ and ending at about 3700\$. It shows that the model doesn't expect cocoa to return to its pre-2023 prices, but instead stabilize at a higher baseline value.
+
+Crucially, the confidence intervals reveal a natural and realistic asymmetric flare. Due to sky-high prices from the recent crisis, the uncertainty fan has an upper bound of the 95% interval at over 7000\$, while the lower bound compresses and bottoms at 1500\$.
+
+# CONCLUSION
+
+This project demonstrated the full Box-Jenkins pipeline on a real-world time series with challenging dynamics The selected **ARIMA(2,1,2)(1,0,0)[12] w/ drift** passed all diagnostic checks, confirming a statistically valid model. However, the out-of-sample evaluation exposed a limitation of linear time series models: the accuracy metrics don't reflect a methodological failure, but the impossibility of dealing with a market crisis related to non-controllable factors with no historical precedent, like extreme West African weather events.
+
+For future work, machine learning approaches might deal better with the non-linear dynamics, despite the interpretability cost and statistical rigor that makes the Box-Jenkins framework valuable. As for an alternative within classical methods, an **ETS(M, Ad, N)** could handle the heteroscedacity in the data's variance directly without a log transformation, while the damped trend component could naturally smooth the forecast over time.
+
+## Data Export
+
+```{r save-tsibble}
+# Saving the cleaned cocoa tsibble for reproducibility
+save(cocoa, file = "data_group_13.RData")
+```
+
+## References
+
+-   "Global Price of Cocoa (PCOCOUSDM)." FRED, Federal Reserve Bank of St. Louis, 26 May 2026, <https://fred.stlouisfed.org/series/PCOCOUSDM>
+-   "Cocoa crisis (2020s)." *Wikipedia: The Free Encyclopedia*, Wikimedia Foundation, 26 May 2026, [https://en.wikipedia.org/wiki/Cocoa_crisis\_(2020s)](https://en.wikipedia.org/wiki/Cocoa_crisis_(2020s))
+
+## SESSION INFO
+
+```{r session-info, echo=FALSE}
+sessionInfo()
+```
