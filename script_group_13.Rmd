@@ -22,8 +22,15 @@ library(dplyr)
 library(ggplot2)
 library(lubridate)
 
-# Using API key for access to dataset, from library fredr
-fredr_set_key("14da34f1201fa46c838595fe42148d06")
+# Code to get dataset from FRED without permanent api key, for reproducibility purposes
+fred_api_key <- Sys.getenv("FRED_API_KEY")
+
+if (fred_api_key == "") {
+  stop("Please set the FRED_API_KEY environment variable before knitting this notebook.")
+}
+
+fredr_set_key(fred_api_key)
+
 
 # Filter dataset from FRED since 2000
 raw_cocoa <- fredr(
@@ -60,7 +67,7 @@ cocoa <- cocoa %>%
   mutate(log_price = log(Price))
 ```
 
-Visual inspection of the raw time series reveals heteroscedacity. When the price of cocoa increases, the variance increases. To stabilize these changes, we apply a log transformation before conducting stationary tests or differencing.
+Visual inspection of the raw time series reveals heteroskedasticity. When the price of cocoa increases, the variance increases. To stabilize these changes, we apply a log transformation before conducting stationary tests or differencing.
 
 ## Data Partitioning
 
@@ -114,7 +121,7 @@ After taking the first difference (d=1), the series now looks stationary. The AC
 
 We use Information Criteria as a supplementary guide to evaluate our candidate models.
 
-Given our moderate sample size, we prioritize AICc (and AIC) over BIC, as AIC-based criteria perform better in smaller samples, while BIC can become unreliable and select overparameterized models in this case.
+Given our moderate sample size, we prioritize AICc (and AIC) while also reporting BIC, since BIC penalizes complexity strongly and often favors simpler models, and AICc is usually better in smaller samples.
 
 ```{r fit-models}
 # Fitting candidate SARIMA models from previous analysis
@@ -197,22 +204,22 @@ The diagnostic plots confirm that the model's residuals can be considered white 
 
 The innovation residuals bounce randomly around 0, even with a non-constant variance, showing how volatile the cocoa market is.
 
-The ACF plot demonstrates a clear lack of correlation, with all the lags inside the threshold lines, proving the model captures all the available patterns in the data.
+The ACF plot demonstrates a clear lack of correlation, with all the lags inside the threshold lines, suggesting the model captures the main autocorrelation in the data.
 
-Finally, the residual errors are normally distributed, with higher density around the 0 with few values forming small tails, ensuring the that the calculated confidence intervals are reliable.
+Finally, the residual errors are normally distributed, with higher density around the 0 with few values forming small tails. This improves the quality of the approximate confidence intervals.
 
 ## Ljung-Box Test for Residual Independence
 
 To mathematically support our visual inspection, we conduct a Ljung-Box Test ($\alpha = 0.05$) to verify residual independence.
 
 ```{r ljung-box}
-# lag = 24 for monthly data, dof = 5 (ARIMA(2,1,2)(1,0,0)[12], 2+1+2=5)
+# lag = 24 for monthly data, dof = 5 (ARIMA(2,1,2)(0,0,0)[12], 2+2+drift=5)
 best_model %>%
   augment() %>%
   features(.innov, ljung_box, lag = 24, dof = 5)
 ```
 
-The test gives a Ljung-box test statistic of 13.70356 and a p-value of 0.801. Since the p-value is substantially higher than the significance level, we fail to reject the null hypothesis. We can conclude that the model's residuals are independent and behave as a white noise process.
+The test gives a Ljung-box test statistic of 13.79523 and a p-value of 0.795. Since the p-value is substantially higher than the significance level, we fail to reject the null hypothesis. We can conclude that the model's residuals are independent and behave as a white noise process.
 
 # FORECASTING PHASE
 
@@ -235,15 +242,15 @@ knitr::kable(
 )
 ```
 
-The results show how our model performs when forced to predict under an unprecedented market shock. We have a RMSE = 2446.6\$ and a MAE = 1835.6\$, meaning that on average, the point forecast was off almost 2000\$ per metric ton. Although this is high, it accurately shows the difficulty faced by a linear model when working with such unpredictable data.
+The results show how our model performs when forced to predict under an unprecedented market shock. We have a RMSE = 2417.7\$ and a MAE = 1811.6\$, meaning that on average, the point forecast was off almost 2000\$ per metric ton. Although this is high, it accurately shows the difficulty faced by a linear model when working with such unpredictable data.
 
-The MAPE is 33.8%, which confirms the model struggled. Because the model's point forecast aims for a conservative stabilization line after a major trend shift, it significantly underpredicted the peak crisis values.
+The MAPE is 33.3%, which confirms the model struggled. Because the model's point forecast aims for a conservative stabilization line after a major trend shift, it significantly underpredicted the peak crisis values.
 
 ## 2 Year Forecast
 
 ```{r forecast-2y}
 final_model <- cocoa %>%
-  model(SARIMA_auto = ARIMA(log(Price)))
+  model(ARIMA_212_000 = ARIMA(log(Price) ~ pdq(2,1,2) + PDQ(0,0,0, period=12)))
 
 final_model %>%
   report()
@@ -267,15 +274,19 @@ Crucially, the confidence intervals reveal a natural and realistic asymmetric fl
 
 # CONCLUSION
 
-This project demonstrated the full Box-Jenkins pipeline on a real-world time series with challenging dynamics The selected **ARIMA(2,1,2)(1,0,0)[12] w/ drift** passed all diagnostic checks, confirming a statistically valid model. However, the out-of-sample evaluation exposed a limitation of linear time series models: the accuracy metrics don't reflect a methodological failure, but the impossibility of dealing with a market crisis related to non-controllable factors with no historical precedent, like extreme West African weather events.
+This project demonstrated the full Box-Jenkins pipeline on a real-world time series with challenging dynamics. The selected **ARIMA(2,1,2)(0,0,0)[12] w/ drift** passed the residual diagnostic checks, confirming a statistically adequate model. However, the out-of-sample evaluation exposed a limitation of linear time series models: the accuracy metrics don't reflect a methodological failure, but the impossibility of dealing with a market crisis related to non-controllable factors with no historical precedent, like extreme West African weather events.
 
-For future work, machine learning approaches might deal better with the non-linear dynamics, despite the interpretability cost and statistical rigor that makes the Box-Jenkins framework valuable. As for an alternative within classical methods, an **ETS(M, Ad, N)** could handle the heteroscedacity in the data's variance directly without a log transformation, while the damped trend component could naturally smooth the forecast over time.
+For future work, machine learning approaches might deal better with the non-linear dynamics, despite the interpretability cost and statistical rigor that makes the Box-Jenkins framework valuable. As for an alternative within classical methods, an **ETS(M, Ad, N)** could handle the heteroskedasticity in the data's variance directly without a log transformation, while the damped trend component could naturally smooth the forecast over time.
 
 ## Data Export
 
 ```{r save-tsibble}
 # Saving the cleaned cocoa tsibble for reproducibility
 save(cocoa, file = "data_group_13.RData")
+
+## reproducibility note
+## To reproduce the FRED data download, set a valid API key in the `FRED_API_KEY`
+## environment variable before knitting. Use the cleaned dataset
 ```
 
 ## References
